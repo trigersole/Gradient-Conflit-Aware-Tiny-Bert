@@ -1,106 +1,182 @@
-# TinyBERT gradient-conflict diagnostic
+# TinyBERT gradient-conflict experiment
 
-This workspace includes a drop-in diagnostic for the first experiment: train a
-normal fixed-weight TinyBERT baseline while measuring
-`cos(g_task, g_prediction)`, `cos(g_task, g_hidden)`, and
-`cos(g_task, g_attention)` every tenth batch.
+This repository runs a complete fixed-weight TinyBERT-style SST-2 experiment
+and measures these quantities every tenth training batch:
 
-The implementation is in [`gradient_conflict.py`](gradient_conflict.py). It
-uses `torch.autograd.grad`, so it does **not** populate or alter `.grad`; the
-ordinary weighted-sum training update remains unchanged.
+- `cos(g_task, g_prediction)`
+- `cos(g_task, g_hidden)`
+- `cos(g_task, g_attention)`
 
-## Add it to the training loop
+The diagnostic does not modify the training gradients or dynamically change
+loss weights. This is the baseline experiment to establish whether the three
+teacher signals conflict with the supervised task gradient.
 
-Create the probe once. Select only the shared student encoder parameters, not
-the classifier or the student-to-teacher hidden projection layers:
+## Default models
 
-```python
-from gradient_conflict import GradientConflictProbe, shared_encoder_parameters
+| Role | Hugging Face checkpoint | Layers | Hidden | Heads |
+|---|---|---:|---:|---:|
+| Fine-tuned teacher | `takedarn/bert-medium-sst2` | 8 | 512 | 8 |
+| Pretrained student | `huawei-noah/TinyBERT_General_4L_312D` | 4 | 312 | 12 |
 
-probe = GradientConflictProbe(
-    parameters=shared_encoder_parameters(student),
-    every_n_steps=10,
-    csv_path="runs/baseline_seed_42/gradient_cosines.csv",
-    gradient_mode="raw",
-)
+The teacher is already fine-tuned on SST-2 and is frozen throughout the run.
+The pipeline checks its validation accuracy before training the student and
+stops if it is below 80%. No teacher fine-tuning stage is performed.
+
+Student layers 1–4 are matched to teacher layers 2, 4, 6 and 8. Learned linear
+layers project hidden states from 312 to 512 dimensions. Because the models
+have different attention-head counts, the attention loss compares the
+head-averaged token-to-token maps. Padding is excluded from hidden and
+attention losses.
+
+## Files
+
+- `train_tinybert.py`: dataset, models, four losses, training, evaluation and
+  artifact saving.
+- `gradient_conflict.py`: gradient cosine measurement and summary statistics.
+- `submit.slurm`: one-GPU SLURM job, including an optional smoke-test mode.
+- `requirements.txt`: Python dependencies.
+- `tests/`: numerical checks for the probe, layer mapping and losses.
+
+## Local or interactive GPU setup
+
+Use Python 3.10 or newer. Install the PyTorch build recommended by your cluster
+for its CUDA driver, then install the remaining dependencies:
+
+```bash
+python -m venv .venv
+source .venv/bin/activate
+python -m pip install --upgrade pip
+pip install torch
+pip install -r requirements.txt
 ```
 
-Then retain each component loss and call the probe **before** the normal
-backward pass. `global_step` is 1-based here.
+Verify that PyTorch sees the allocated GPU:
 
-```python
-for batch_index, batch in enumerate(train_loader):
-    global_step += 1
-    optimizer.zero_grad(set_to_none=True)
-
-    # Existing TinyBERT forward/loss code:
-    student_output = student(**batch, output_hidden_states=True,
-                             output_attentions=True)
-    with torch.no_grad():
-        teacher_output = teacher(**batch, output_hidden_states=True,
-                                 output_attentions=True)
-
-    task_loss = compute_task_loss(student_output.logits, batch["labels"])
-    prediction_loss = compute_prediction_loss(
-        student_output.logits, teacher_output.logits, temperature
-    )
-    hidden_loss = compute_hidden_loss(
-        student_output.hidden_states, teacher_output.hidden_states
-    )
-    attention_loss = compute_attention_loss(
-        student_output.attentions, teacher_output.attentions
-    )
-
-    losses = {
-        "task": task_loss,
-        "prediction": prediction_loss,
-        "hidden": hidden_loss,
-        "attention": attention_loss,
-    }
-    measurement = probe.measure(losses, step=global_step, epoch=epoch)
-    if measurement is not None:
-        print(
-            f"step={global_step} "
-            f"P={measurement['cos_task_prediction']:+.3f} "
-            f"H={measurement['cos_task_hidden']:+.3f} "
-            f"A={measurement['cos_task_attention']:+.3f}"
-        )
-
-    # This is still the normal fixed-weight TinyBERT update.
-    total_loss = (
-        task_weight * task_loss
-        + prediction_weight * prediction_loss
-        + hidden_weight * hidden_loss
-        + attention_weight * attention_loss
-    )
-    total_loss.backward()
-    optimizer.step()
+```bash
+python -c "import torch; print(torch.__version__); print(torch.cuda.is_available()); print(torch.cuda.get_device_name(0))"
 ```
 
-At the end of training, write and print the aggregate result:
+Run the tests:
 
-```python
-probe.write_summary("runs/baseline_seed_42/gradient_conflict_summary.json")
-print(probe.format_summary())
-probe.close()
+```bash
+python -m unittest discover -s tests -v
 ```
 
-The CSV includes losses, gradient norms, and the three cosine values per sampled
-batch. The JSON includes the percentage of valid sampled batches with negative
-cosine, mean cosine, and mean negative cosine conditional on conflict.
+## SLURM quick start
 
-## Important details
+Clone the repository on the cluster and create the environment once on a login
+or interactive node:
 
-- Measure before `total_loss.backward()`. This preserves the graph for the real
-  update and keeps the measurement independent of the loss weights.
-- With gradient accumulation, pass the micro-batch counter if "every tenth
-  batch" is intended, or the optimizer-step counter if "every tenth update" is
-  intended. Do not mix the two across runs.
-- Under mixed precision, pass the original unscaled component losses. Dot
-  products and norms are accumulated in float32.
-- A zero-norm gradient produces `NaN` in the CSV and is excluded from the
-  negative-percentage denominator. This prevents an unused signal from being
-  mislabeled as non-conflicting.
-- `gradient_mode="log_loss"` implements the proposal's
-  `grad(log(L + epsilon))` normalization. It changes reported norms, but not
-  cosine direction for positive losses.
+```bash
+git clone https://github.com/trigersole/Gradient-Conflit-Aware-Tiny-Bert.git
+cd Gradient-Conflit-Aware-Tiny-Bert
+python -m venv .venv
+source .venv/bin/activate
+python -m pip install --upgrade pip
+pip install torch
+pip install -r requirements.txt
+```
+
+Edit `submit.slurm` for your cluster. In particular, check its partition,
+account, module names, time limit and GPU request. Some clusters use
+`--gpus=1` instead of `--gres=gpu:1`.
+
+Run the ten-step smoke test first:
+
+```bash
+mkdir -p logs
+sbatch --export=ALL,SMOKE_TEST=1 submit.slurm
+```
+
+Watch it with:
+
+```bash
+squeue -u "$USER"
+tail -f logs/tinybert-conflict-JOB_ID.out
+```
+
+After the smoke test succeeds, submit the full three-epoch run:
+
+```bash
+sbatch submit.slurm
+```
+
+The first run downloads the two model checkpoints and GLUE/SST-2 into
+`$HF_HOME`. If compute nodes cannot access the internet, start an interactive
+GPU/login session with internet access, set the same `HF_HOME`, and run the
+smoke test once there so the model and dataset caches are populated.
+
+## Direct command
+
+The equivalent direct training command is:
+
+```bash
+python train_tinybert.py \
+  --output-dir runs/seed-42 \
+  --epochs 3 \
+  --batch-size 32 \
+  --eval-batch-size 64 \
+  --temperature 4.0 \
+  --measure-every 10 \
+  --seed 42 \
+  --fp16
+```
+
+For a quick functional check:
+
+```bash
+python train_tinybert.py --smoke-test --output-dir runs/smoke --fp16
+```
+
+## Losses and measurement
+
+The ordinary student update is the fixed weighted sum
+
+```text
+L = w_task L_task + w_prediction L_prediction
+    + w_hidden L_hidden + w_attention L_attention
+```
+
+All weights default to 1.0 and are configurable with `--task-weight`,
+`--prediction-weight`, `--hidden-weight` and `--attention-weight`.
+Prediction distillation uses temperature-scaled KL divergence. Task loss is
+cross-entropy. Hidden and attention losses are padding-masked MSE values.
+
+The gradient probe runs before the normal backward pass using
+`torch.autograd.grad`, which leaves `.grad` untouched. It measures only student
+embeddings and transformer-block parameters—not classifier, pooler or hidden
+projection parameters. A zero-norm measurement is written as `NaN` and excluded
+from the conflict-frequency denominator.
+
+## Outputs
+
+Each output directory contains:
+
+```text
+gradient_cosines.csv
+gradient_conflict_summary.json
+results.json
+run_config.json
+hidden_projections.pt
+student/
+```
+
+`gradient_cosines.csv` contains the three cosine values, individual losses and
+gradient norms for each sampled batch. `gradient_conflict_summary.json` reports
+the negative-cosine percentage, mean cosine and conditional mean negative
+cosine for each teacher signal. `results.json` also records teacher/student
+validation accuracy, layer mapping, loss weights, runtime and seed.
+
+The final console output includes a table such as:
+
+```text
+| Signal     | Batches with negative cosine | Valid sampled batches |
+|------------|------------------------------:|----------------------:|
+| Prediction |                          4.0% |                   200 |
+| Hidden     |                         18.0% |                   200 |
+| Attention  |                         35.0% |                   200 |
+```
+
+Run at least three seeds before treating the observed percentages as a result.
+Keep the model checkpoints, loss weights, batch size, sampling interval and
+dataset split identical between seeds.

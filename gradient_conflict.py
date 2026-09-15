@@ -44,7 +44,22 @@ def shared_encoder_parameters(student: nn.Module) -> list[nn.Parameter]:
             "Could not locate the student encoder. Pass your shared encoder "
             "parameters explicitly to GradientConflictProbe."
         )
-    parameters = [parameter for parameter in encoder.parameters() if parameter.requires_grad]
+    # Hugging Face BERT-like base models may include a pooler. The pooler feeds
+    # classification/logit objectives but not intermediate-state objectives,
+    # so including it would inflate only some gradient norms. Keep embeddings
+    # and transformer blocks while excluding the pooler when possible.
+    components = [
+        getattr(encoder, name, None)
+        for name in ("embeddings", "encoder", "transformer")
+    ]
+    components = [component for component in components if component is not None]
+    source = components if components else [encoder]
+    parameters = [
+        parameter
+        for component in source
+        for parameter in component.parameters()
+        if parameter.requires_grad
+    ]
     if not parameters:
         raise ValueError("The selected student encoder has no trainable parameters.")
     return parameters

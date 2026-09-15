@@ -1,0 +1,12 @@
+__pycache__/
+*.py[cod]
+.venv/
+.pytest_cache/
+
+runs/
+logs/
+huggingface-cache/
+
+# Local proposal-generation artifacts are outside the training repository.
+output/
+tmp/
