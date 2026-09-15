@@ -15,18 +15,18 @@ teacher signals conflict with the supervised task gradient.
 
 | Role | Hugging Face checkpoint | Layers | Hidden | Heads |
 |---|---|---:|---:|---:|
-| Fine-tuned teacher | `takedarn/bert-medium-sst2` | 8 | 512 | 8 |
+| Fine-tuned teacher | `yoshitomo-matsubara/bert-base-uncased-sst2` | 12 | 768 | 12 |
 | Pretrained student | `huawei-noah/TinyBERT_General_4L_312D` | 4 | 312 | 12 |
 
 The teacher is already fine-tuned on SST-2 and is frozen throughout the run.
 The pipeline checks its validation accuracy before training the student and
-stops if it is below 80%. No teacher fine-tuning stage is performed.
+stops if it is below 80%. No teacher fine-tuning stage is performed. Both the
+teacher checkpoint and the official TinyBERT project declare Apache-2.0 terms.
 
-Student layers 1–4 are matched to teacher layers 2, 4, 6 and 8. Learned linear
-layers project hidden states from 312 to 512 dimensions. Because the models
-have different attention-head counts, the attention loss compares the
-head-averaged token-to-token maps. Padding is excluded from hidden and
-attention losses.
+Student layers 1–4 are matched to teacher layers 3, 6, 9 and 12. Learned linear
+layers project hidden states from 312 to 768 dimensions. Both models have 12
+attention heads, so the attention loss compares corresponding heads directly.
+Padding is excluded from hidden and attention losses.
 
 ## Files
 
@@ -114,8 +114,8 @@ The equivalent direct training command is:
 python train_tinybert.py \
   --output-dir runs/seed-42 \
   --epochs 3 \
-  --batch-size 32 \
-  --eval-batch-size 64 \
+  --batch-size 16 \
+  --eval-batch-size 32 \
   --temperature 4.0 \
   --measure-every 10 \
   --seed 42 \

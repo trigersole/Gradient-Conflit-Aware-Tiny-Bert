@@ -30,7 +30,7 @@ from transformers import (
 from gradient_conflict import GradientConflictProbe, shared_encoder_parameters
 
 
-DEFAULT_TEACHER = "takedarn/bert-medium-sst2"
+DEFAULT_TEACHER = "yoshitomo-matsubara/bert-base-uncased-sst2"
 DEFAULT_STUDENT = "huawei-noah/TinyBERT_General_4L_312D"
 
 
@@ -103,16 +103,21 @@ def attention_distillation_loss(
     layer_pairs: list[LayerPair],
     attention_mask: Tensor,
 ) -> Tensor:
-    # The default teacher has 8 heads and TinyBERT has 12. Averaging heads
-    # retains token-to-token structure and makes their shapes comparable.
     token_mask = attention_mask.to(dtype=student_attentions[0].dtype)
     pair_mask = token_mask[:, None, :, None] * token_mask[:, None, None, :]
     losses = []
     for pair in layer_pairs:
-        student_map = student_attentions[pair.student_attention].mean(dim=1, keepdim=True)
-        teacher_map = teacher_attentions[pair.teacher_attention].mean(dim=1, keepdim=True)
+        student_map = student_attentions[pair.student_attention]
+        teacher_map = teacher_attentions[pair.teacher_attention]
+        if student_map.shape[1] != teacher_map.shape[1]:
+            # Non-default teachers with a different number of heads remain
+            # usable through head-averaged maps. The canonical 12-head teacher
+            # and 12-head TinyBERT student take the direct head-wise path.
+            student_map = student_map.mean(dim=1, keepdim=True)
+            teacher_map = teacher_map.mean(dim=1, keepdim=True)
         squared_error = (student_map - teacher_map).square() * pair_mask
-        losses.append(squared_error.sum() / pair_mask.sum().clamp_min(1.0))
+        denominator = pair_mask.sum().clamp_min(1.0) * student_map.shape[1]
+        losses.append(squared_error.sum() / denominator)
     return torch.stack(losses).mean()
 
 
@@ -391,8 +396,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--student-model", default=DEFAULT_STUDENT)
     parser.add_argument("--output-dir", default="runs/tinybert-sst2")
     parser.add_argument("--epochs", type=int, default=3)
-    parser.add_argument("--batch-size", type=int, default=32)
-    parser.add_argument("--eval-batch-size", type=int, default=64)
+    parser.add_argument("--batch-size", type=int, default=16)
+    parser.add_argument("--eval-batch-size", type=int, default=32)
     parser.add_argument("--learning-rate", type=float, default=3e-5)
     parser.add_argument("--weight-decay", type=float, default=0.01)
     parser.add_argument("--warmup-ratio", type=float, default=0.1)

@@ -30,8 +30,8 @@ fi
 srun python train_tinybert.py \
   --output-dir "runs/${SLURM_JOB_ID}" \
   --epochs 3 \
-  --batch-size 32 \
-  --eval-batch-size 64 \
+  --batch-size 16 \
+  --eval-batch-size 32 \
   --measure-every 10 \
   --temperature 4.0 \
   --seed 42 \

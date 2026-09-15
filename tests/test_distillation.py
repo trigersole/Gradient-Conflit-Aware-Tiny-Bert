@@ -8,12 +8,12 @@ except ModuleNotFoundError:
 
 @unittest.skipIf(torch is None, "PyTorch is not installed")
 class DistillationTest(unittest.TestCase):
-    def test_layer_mapping_4_to_8(self):
+    def test_layer_mapping_4_to_12(self):
         from train_tinybert import make_layer_pairs
 
-        pairs = make_layer_pairs(4, 8)
-        self.assertEqual([pair.teacher_hidden for pair in pairs], [2, 4, 6, 8])
-        self.assertEqual([pair.teacher_attention for pair in pairs], [1, 3, 5, 7])
+        pairs = make_layer_pairs(4, 12)
+        self.assertEqual([pair.teacher_hidden for pair in pairs], [3, 6, 9, 12])
+        self.assertEqual([pair.teacher_attention for pair in pairs], [2, 5, 8, 11])
 
     def test_prediction_loss_is_near_zero_for_equal_logits(self):
         from train_tinybert import prediction_distillation_loss
@@ -54,6 +54,21 @@ class DistillationTest(unittest.TestCase):
             torch.tensor([[1, 0]]),
         )
         self.assertEqual(float(loss), 0.0)
+
+    def test_attention_loss_is_headwise_when_counts_match(self):
+        from train_tinybert import LayerPair, attention_distillation_loss
+
+        # The two models have identical head averages but swapped individual
+        # heads. Direct head-wise comparison must therefore produce a loss.
+        student_map = torch.tensor([[[[1.0]], [[0.0]]]])
+        teacher_map = torch.tensor([[[[0.0]], [[1.0]]]])
+        loss = attention_distillation_loss(
+            (student_map,),
+            (teacher_map,),
+            [LayerPair(1, 1, 0, 0)],
+            torch.tensor([[1]]),
+        )
+        self.assertEqual(float(loss), 1.0)
 
 
 if __name__ == "__main__":
